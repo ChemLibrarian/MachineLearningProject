@@ -1,0 +1,207 @@
+---
+title: "Classifying Weight Lifting Movements: A course project of Practical Machine Learning"
+author: "Ye Li"
+date: "November 11, 2015"
+output: html_document
+---
+
+# Executive Summary 
+This project is to build a model to clasify body postures and movements based on the Weight Lifting Exercises (WLE) Dataset from a Human Activity Recoginition (HAR) project. The dataset is available at [http://groupware.les.inf.puc-rio.br/har](http://groupware.les.inf.puc-rio.br/har). 
+
+Details about the dataset and this study can be found in this publication: Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. [Qualitative Activity Recognition of Weight Lifting Exercises](http://groupware.les.inf.puc-rio.br/work.jsf?p1=11201). Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013. 
+
+This project below built a prediction model to classify the movements through the random forest methods with 3-fold cv resampling methods and achived 99.4% out-of-sample accuracy in cross validation. 
+
+# Data Overview and Pre-processing
+```{r preprocessing, echo=FALSE, eval=TRUE, cache=TRUE, results='hide'}
+# Load data
+pml.testing <- read.csv("pml-testing.csv")
+pml.training <- read.csv("pml-training.csv")
+
+# Exploratory analysis
+str(pml.training)
+summary(pml.training)
+suppressPackageStartupMessages(library(dplyr)) 
+suppressPackageStartupMessages(library(ggplot2)) 
+pml.training_UserClasses <- pml.training %>%
+        select(user_name, classe) %>%
+        group_by(user_name, classe) %>%
+        summarise(count=n())
+plot1 <- ggplot(data = pml.training_UserClasses, aes(x = classe, y = count)) +
+        geom_bar(stat = "identity") + 
+        facet_grid(.~ user_name) + 
+        ggtitle("Figure 1 Counts of observations for each class of movements by each participant")
+
+
+```
+The WLE dataset was collected from accelerometers on the belt, forearm, arm, and dumbell of 6 participants, who were asked to perform barbell lifts correctly and incorrectly in 5 different ways (see Table 1). 
+
+Table 1 Five different ways for Barbell lifts 
+
+Class   | Barbell lift ways
+--------| ----------------------------------------
+A       | Exactly according to the specificaiton
+B       | Throwing the elbows to the front 
+C       | Lifting the dumbbell only halfway
+D       | Lowering the dumbbell only halfway
+E       | Throwing the hips to the front
+
+The number of observations for each class of lifting movement is shown in Figure 1. 
+```{r plot1, echo=FALSE}
+print(plot1)
+```
+
+
+# Prediction Models and Crossvalidation
+Since this model is used to predict the classification of movement, the error measures for the prediction should be *Accuracy of the prediction*. 
+
+## Feature selection and model selection
+To select those valid features for prediction, here are the two major considerations in preparing the data. 
+
+1. In the dataset, the first seven variables, `r names(pml.training[, c(1,2,3,4,5,6,7)])`, 
+are not data measured with sensors and should be removed from the datasets during prediction.
+
+2. There are also many variables with more than 97% NA values. Imputing these variables would cause false predictions. A function (getFractionMissing) shared by Michael Szczepaniak at a [forum post](https://class.coursera.org/predmachlearn-034/forum/thread?thread_id=25) is used to calculate the fractions of NA values under Michael's permission.  Those varables with more than 97% NA values are excluded from the prediction model. 
+
+After removing these variables, there are 53 variables left. The rest of feature selection will be performed by PCA preProcessing function in the R carat package. The function used to fit the model is Random Forest (RF). 
+
+The pml.training dataset is split into two sets with the 70% data as training set and 30% as testing set.  
+
+
+```{r modeling, echo=FALSE, cache=TRUE, results='hide'}
+# prepare data for modeling 
+# remove variable 1 -7 from both datasets
+pml.training <- pml.training[,8:160]
+pml.testing <- pml.testing[,8:160]
+
+# Use 70% of training data to build model
+suppressPackageStartupMessages(require(caret)) 
+set.seed(345)
+inTrain <- createDataPartition(y=pml.training$classe, p = 0.7, list = FALSE)
+trainPML <- pml.training[inTrain,]
+testPML <- pml.training[-inTrain,]
+
+## The following function to select variables with too many NAs is shared by Michael Szczepaniak
+## at a forum post https://class.coursera.org/predmachlearn-034/forum/thread?thread_id=25 
+## and permitted classmates to reuse for the course project.
+## Creates a data frame with three columns: index, ColumnName and FractionMissing.
+## index is the column index in df corresponding to ColumnName
+## ColumnName is as the name implies: the name the column in df
+## FractionMissing is the fraction of values that are missing or NA.
+## The closer this value is to 1, the less data the column contains
+getFractionMissing <- function(df = rawActitivity) {
+    colCount <- ncol(df)
+    returnDf <- data.frame(index=1:ncol(df),
+                           columnName=rep("undefined", colCount),
+                           FractionMissing=rep(-1, colCount),
+                           stringsAsFactors=FALSE)
+    for(i in 1:colCount) {
+        colVector <- df[,i]
+        missingCount <- length(which(colVector == "") * 1)
+        missingCount <- missingCount + sum(is.na(colVector) * 1)
+        returnDf$columnName[i] <- as.character(names(df)[i])
+        returnDf$FractionMissing[i] <- missingCount / length(colVector)
+    }
+
+    return(returnDf)
+}
+
+fractionMissing <- getFractionMissing(pml.training)
+
+suppressPackageStartupMessages(require(dplyr))  
+indexUse <- filter(fractionMissing, FractionMissing < 0.97)
+
+# Use Random Frorest training without PCA preProcessing as preProcessing function to fit the model
+
+modelFit <- train(trainPML[, indexUse$index]$classe ~., method = "rf", data = trainPML[,indexUse$index], trControl = trainControl(method = "cv", number = 3, allowParallel = TRUE))
+
+CVresult <- confusionMatrix(testPML[,indexUse$index]$classe, predict(modelFit,testPML[,indexUse$index]))
+
+# The following models were used to explore different parameters. Did not run all of them to save
+# time for the .Rmd file processing. 
+# modelFit4 <- train(trainPML[, indexUse$index]$classe ~., method = "rf", preProcess = "pca", data = trainPML[,indexUse$index], trControl = trainControl(allowParallel = TRUE))
+# print(modelFit4)
+# confusionMatrix(testPML[,indexUse$index]$classe, predict(modelFit4,testPML[,indexUse$index]))
+
+# modelFit1 <- train(trainPML[, indexUse$index]$classe ~., method = "rf", preProcess = "pca", data = trainPML[,indexUse$index], trControl = trainControl(method = "cv", number = 3, allowParallel = TRUE))
+# print(modelFit1)
+# confusionMatrix(testPML[,indexUse$index]$classe, predict(modelFit1,testPML[,indexUse$index]))
+# 
+# modelFit2 <- train(trainPML[, indexUse$index]$classe ~., method = "rf", preProcess = "pca", data = trainPML[,indexUse$index], trControl = trainControl(method = "cv", number = 5, allowParallel = TRUE))
+# print(modelFit2)
+# confusionMatrix(testPML[,indexUse$index]$classe, predict(modelFit2,testPML[,indexUse$index]))
+# 
+# modelFit3 <- train(trainPML[, indexUse$index]$classe ~., method = "rf", data = trainPML[,indexUse$index], trControl = trainControl(method = "cv", number = 5, allowParallel = TRUE))
+# print(modelFit3)
+# confusionMatrix(testPML[,indexUse$index]$classe, predict(modelFit3,testPML[,indexUse$index]))
+# 
+# modelFit5 <- train(trainPML[, indexUse$index]$classe ~., method = "rf", preProcess = "pca", data = trainPML[,indexUse$index], trControl = trainControl(method = "cv", number = 3,allowParallel = TRUE))
+# print(modelFit5)
+# confusionMatrix(testPML[,indexUse$index]$classe, predict(modelFit5,testPML[,indexUse$index]))
+
+
+```
+
+To select better cross validation resampling, preProcessing method, and training/testing split ratio to fit the model, parameters of modeling were adjusted and the results are listed below. 
+
+Table 2 Parameters and fitting results for model selection
+
+Fitting method   |  Split ratio|PreProcessing|Resampling     | In-sampleAccuracy|Out-of-sample Accuracy
+-----------------| ------------|-------------|---------------|------------------|----------------------
+Random Forest    |    0.6      |  PCA        |    cv, 3      |   95.3%          | 96.8%
+Random Forest    |    0.6      |  PCA        |bootstrapped,25|   95.5%          | 96.8% 
+Random Forest    |    0.7      |  PCA        |    cv, 5      |   96.8%          | 97.5%
+Random Forest    |    0.7      |   -         |    cv, 5      |   99.0%          | 99.2%
+Random Forest    |    0.7      |  PCA        |    cv, 3      |   95.6%          | 97.5% 
+Random Forest    |    0.7      |   -         |    cv, 3      |   98.9%          | 99.4%
+
+(Note: to save running time of the script, only the final selected modeling is executed in the .Rmd file. )
+
+The RF method appears to give higher than 95% accuracy for in-sample and out-of-sample prediction. Therefore, no other methods were used for the modeling. 
+
+Among all the above modelings, the RF with PCA PreProcessing and bootstrapped resampling takes the longest time (~36 min when allowParallel = TRUE on a 2.8G i7 core 16G Memory MacBook Pro) while the rest takes 4 - 10 min.
+
+The PCA preProcessing seems to be time-consuming and decrease the accuracy of classification. Therefore, PCA preProcessing will not be used for the final model. 
+
+Considering the best out-of-sample accuracy and less time used for model fitting, the Random Forest method with 3-fold cv resampling is chosen as the final model. The fitted model detail and the cross validation results is shown below. The *overall out-of-sample Accuracy* is `r CVresult$overall['Accuracy']`. 
+
+```{r modeldisplay, echo=FALSE}
+suppressPackageStartupMessages(require(caret))
+suppressPackageStartupMessages(require(randomForest))
+print(modelFit)
+confusionMatrix(testPML[,indexUse$index]$classe, predict(modelFit,testPML[,indexUse$index]))
+```
+The balanced accuracy of prediction for class C is slightly lower than other classes. It may be caused by less observations were available for class C as shown in figure 1. 
+
+# Prediction 
+Apply the chosen model to the pml.testing dataset. The prediction result is shown below. 
+```{r prediction, echo=FALSE}
+pred <-  predict(modelFit,pml.testing[,indexUse$index])
+print(pred)
+
+# with 0.7 sampling . cv 3 - 
+# B A B A A E D B A A B C B A E E A B B B
+
+#without PCA 
+# B A B A A E D B A A B C B A E E A B B B
+
+# without PCA, cv 3
+# B A B A A E D B A A B C B A E E A B B B
+
+# save the result into seperate files for submission to the Course project
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+pml_write_files(pred)
+
+```
+Submitting the prediction results through the Coursera course page shows that that the predicitons were 100% correct. 
+
+# Conclusion 
+The features measured by the sensors could be used to classify the weight lifting movements, including the correct movements and false movements. The prediction model established in this study used the Random Forest method with 3 folds cv resampling. The in-sample accuracy of the model is 98.9% and out-of-sample accuracy is 99.4%. Applying this model to the pml.testing set proved that this model can classify this set of data completely correct. 
+
